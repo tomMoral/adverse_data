@@ -1,0 +1,6 @@
+# Cache directory
+.cache
+__pycache__
+
+# data and images
+*.pdf

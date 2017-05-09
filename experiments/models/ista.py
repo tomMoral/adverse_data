@@ -11,6 +11,12 @@ def soft_thresholding(x, mu):
     return np.sign(x) * np.maximum(abs(x) - mu, 0)
 
 
+def _log(progress, cost, verbose=0):
+    if verbose > 0:
+        sys.stdout.write(f"\rProgress: {progress:7.2%} - {cost:15.6f}")
+        sys.stdout.flush()
+
+
 def sc_cost(x, D, zk, lmbd):
     err = x - zk.dot(D)
     l2 = np.sum(err * err, axis=1).mean()
@@ -65,7 +71,7 @@ def fista(X, max_iter, D, lmbd):
     return zk, cost
 
 
-def ista_conv(X, D, lmbd, max_iter):
+def ista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     """Convolutional ISTA for X and D
 
     Parameters
@@ -86,29 +92,31 @@ def ista_conv(X, D, lmbd, max_iter):
     f_cost = ConvL2_z(X, D)
 
     def _cost(z):
-        return f_cost(z) + lmbd * abs(z).sum()
+        return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
 
     # Initiate the algorithm
-    zk = f_cost.get_z0()
+    if z0 is None:
+        zk = f_cost.get_z0()
+    else:
+        zk = np.copy(z0)
     L = f_cost.L
 
     c = _cost(zk)
     cost = [c]
-    sys.stdout.write(f"\rProgress: {0/max_iter:7.2%} - {c:.4f}")
-    sys.stdout.flush()
+    _log(0, c, verbose)
     for i in range(max_iter):
         zk -= f_cost.grad(zk) / L
         zk = soft_thresholding(zk, lmbd / L)
         c = _cost(zk)
         cost += [c]
-        sys.stdout.write(f"\rProgress: {(i+1)/max_iter:7.2%} - {c:.4f}")
-        sys.stdout.flush()
-    print(f"\rProgress: {max_iter/max_iter:7.2%} - {c:.4f}")
+        _log((i + 1) / max_iter, c, verbose)
+    if verbose > 0:
+        print()
 
     return zk, cost
 
 
-def fista_conv(X, D, lmbd, max_iter):
+def fista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     """Convolutional fast ISTA for X and D
 
     Parameters
@@ -129,18 +137,20 @@ def fista_conv(X, D, lmbd, max_iter):
     f_cost = ConvL2_z(X, D)
 
     def _cost(z):
-        return f_cost(z) + lmbd * abs(z).sum()
+        return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
 
     # Initiate the algorithm
-    zk = f_cost.get_z0()
+    if z0 is None:
+        zk = f_cost.get_z0()
+    else:
+        zk = np.copy(z0)
     L = f_cost.L
 
     momentum = 1
     y = zk
     c = _cost(zk)
     cost = [c]
-    sys.stdout.write(f"\rProgress: {0/max_iter:7.2%} - {c:.4f}")
-    sys.stdout.flush()
+    _log(0, c, verbose)
     for i in range(max_iter):
 
         z_old, momentum_1 = zk, momentum
@@ -153,7 +163,6 @@ def fista_conv(X, D, lmbd, max_iter):
 
         c = _cost(zk)
         if c >= cost[-1]:
-            print("\nREstart")
             # Restart the momentum if cost increase
             zk = z_old - f_cost.grad(z_old) / L
             assert f_cost(zk) <= f_cost(z_old)
@@ -161,8 +170,8 @@ def fista_conv(X, D, lmbd, max_iter):
             c = _cost(zk)
 
         cost += [c]
-        sys.stdout.write(f"\rProgress: {(i+1)/max_iter:7.2%} - {c:.4f}")
-        sys.stdout.flush()
-    print(f"\rProgress: {max_iter/max_iter:7.2%} - {c:.4f}")
+        _log((i + 1) / max_iter, c, verbose)
+    if verbose > 0:
+        print()
 
     return zk, cost

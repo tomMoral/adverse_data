@@ -6,7 +6,6 @@ from scipy.signal import convolve2d
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Activation, Flatten
 from keras.layers import Conv2D, MaxPooling2D, Input, ZeroPadding2D
-from keras.layers import merge
 from keras.layers.merge import Add
 from ._cost import ConvL2_z
 
@@ -68,7 +67,6 @@ def convolutional_lista_network(input_dim, d, kernel_size, num_classes,
         z = activation(keras.layers.add([y1, y2]))
     h = Flatten()(z)
     y_pred = Dense(num_classes, activation='softmax')(h)
-    print(y_pred.get_shape)
     model = Model(inputs=x, outputs=y_pred)
 
     if D is not None:
@@ -184,6 +182,20 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
         return Wxk
     Wz_size = Wz.shape[-2:]
 
+    # Compute the loss for our network using the LASSO minimization problem
+    # We zero pad z to obtain the right boundary conditions, with the
+    # border coefficient extending the image by the kernel size.
+    def loss_lasso(_, zk):
+        padding = (Dk.shape[0] // 2, Dk.shape[1] // 2)
+        zp = ZeroPadding2D(padding=padding, data_format='channels_first')(zk)
+
+        x_rec = K.conv2d(zp, K.constant(Dk), padding='same',
+                         data_format='channels_first')
+        err = x_rec - x
+        cost = K.sum(K.mean(err ** 2, axis=(0, 1))) / 2
+        cost += lmbd * K.sum(K.mean(K.abs(zk), axis=0))
+        return cost
+
     # Define an input layer
     x = Input(shape=input_dim)
 
@@ -204,25 +216,7 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
                     kernel_initializer=Wx_initializer)(x)
         z = activation(Add()([y1, y2]))
 
-    # Compute the loss for our network using the LASSO minimization problem
-    # We zero pad z to obtain the right boundary conditions, with the
-    # border coefficient extending the image by the kernel size.
-    def loss_lasso(_, zk):
-        padding = (Dk.shape[0] // 2, Dk.shape[1] // 2)
-        zp = ZeroPadding2D(padding=padding, data_format='channels_first')(zk)
-
-        x_rec = K.conv2d(zp, K.constant(Dk), padding='same',
-                         data_format='channels_first')
-        err = x_rec - x
-        cost = K.sum(K.mean(err ** 2, axis=1)) / 2
-        cost += lmbd * K.sum(K.abs(zk))
-        return cost
-
-    # padding = (Dk.shape[0] // 2, Dk.shape[1] // 2)
-    # zp = ZeroPadding2D(padding=padding, data_format='channels_first')(z)
-    # x_rec = Conv2D(p, Wx_size, padding='same',
-    #                data_format='channels_first', use_bias=False,
-    #                kernel_initializer=lambda a: Dk)(zp)
+    # Construct the model
 
     model = Model(inputs=x, outputs=z)
     opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
@@ -231,4 +225,4 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
     model.Wz = Wz
     model.Wx = Wx
 
-    return model, loss_lasso, []
+    return model, loss_lasso

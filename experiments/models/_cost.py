@@ -126,12 +126,7 @@ class ConvL2_z(object):
         z_fft = fft(z, s=self.fft_shape)
         aux = self.X_fft - np.sum(self.D_fft * z_fft, axis=1, keepdims=True)
         diff = ifft(aux)[self.X_slice[:1] + [0] + self.X_slice[1:]]
-        return np.mean(diff * diff, axis=1).sum() / 2
-
-    def _test(self, z):
-        rec = self.reconstruct(z, self.D)
-        err = rec - self.X
-        assert np.isclose(np.sum(err * err) / 2, self(z))
+        return np.mean(diff * diff, axis=(0, 1)).sum() / 2
 
     def grad(self, z, out=None):
         """Compute the gradient of the cost at point z.
@@ -160,31 +155,6 @@ class ConvL2_z(object):
         Gh -= self.DtX_fft
         out[:] = ifft(Gh).real[z_slice]
         return out
-
-    def grad_debug(self, z, out=None):
-        """Compute the gradient of the cost at point z.
-
-        Parameters
-        ----------
-        z : array-like
-            current point for the gradient computation
-        out: array like (default: None)
-            output array, if it is not None, out should have the same size as
-            z and will be use to store the result.
-
-        The gradient is not scaled with the number of samples N used as this
-        scaling is canceled out by the step size N/L.
-        """
-        if z.ndim == 4:
-            z = z[:, :, None]
-            z_slice = [slice(0, d) for d in z.shape]
-            z_slice[2] = 0
-        else:
-            z_slice = [slice(0, d) for d in z.shape]
-        z_fft = fft(z, s=self.fft_shape)
-        Ghz = np.sum(self.DtD_fft * z_fft[:, None], axis=2)
-        Ghx = self.DtX_fft
-        return ifft(Ghz).real[z_slice], ifft(Ghx).real[z_slice]
 
     def zstep(self, t, z_dual, mu, out=None):
         """Compute the ADMM step associated to this component of the cost.
@@ -227,38 +197,6 @@ class ConvL2_z(object):
             D_fft = D_fft[None]
         rec = (D_fft * z_fft).sum(axis=1)
         return ifft(rec)[X_slice]
-
-    def _test_reconstruct(self):
-        from scipy.signal import convolve2d
-        z = np.random.normal(size=self.z_shape)
-        rec = self.reconstruct(z, self.D)
-        rec2 = np.array([[[convolve2d(znk[0], dkc, mode='full') for dkc in dk]
-                          for dk, znk in zip(self.D, zn)]
-                         for zn in z]).sum(axis=1)
-        assert np.allclose(rec, rec2)
-
-    def _test_diff(self):
-        self._test_reconstruct()
-        z = np.random.normal(size=self.z_shape)
-        diff_slice = self.X_slice[:1] + [0] + self.X_slice[1:]
-        rec = self.reconstruct(z, self.D)
-        diff = self.X - rec
-        z_fft = fft(z, s=self.fft_shape)
-        aux = self.X_fft - np.sum(self.D_fft * z_fft, axis=1, keepdims=True)
-        diff2 = ifft(aux)[diff_slice]
-        assert np.allclose(diff, diff2)
-
-    def _test_cost(self):
-
-        self._test_diff()
-        z = np.random.normal(size=self.z_shape)
-        c = self(z)
-        rec = self.reconstruct(z, self.D)
-        diff = self.X - rec
-        c2 = np.mean(diff * diff, axis=0).sum() / 2
-
-        print(f"diff cost fft: {abs(c - c2)}")
-        assert np.isclose(c, c2)
 
 
 class ConvL2_D(object):

@@ -1,7 +1,5 @@
 import keras
-import IPython
 import numpy as np
-from scipy import signal
 import matplotlib.pyplot as plt
 from numpy.fft import rfft2 as fft, irfft2 as ifft
 
@@ -13,7 +11,7 @@ from .datasets.dictionaries import create_gaussian_conv_dictionary
 from .datasets.labels import sign_test_labels, parity_test_labels
 
 # Model parameters
-N = 100
+N = 30
 d = 10
 p = 64
 k = 5
@@ -51,8 +49,8 @@ data = ifft((D_fft[None] * z_fft[:, :, None]).sum(axis=1))[:, :, :p, :p]
 
 # Base line
 max_iter = N_layers
-m, loss, md = conv_lista_network((c, p, p), D, n_layers=max_iter,
-                                 activation="st", lmbd=lmbd)
+m, loss = conv_lista_network((c, p, p), D, n_layers=max_iter,
+                             activation="st", lmbd=lmbd)
 
 zs, cost_fista = fista_conv(X=data, D=D, lmbd=lmbd, max_iter=max_iter)
 zk, cost_ista = ista_conv(X=data, D=D, lmbd=lmbd, max_iter=max_iter)
@@ -66,16 +64,18 @@ f_cost = ConvL2_z(data, D)
 
 
 def _cost(z):
-    return f_cost(z) + lmbd * abs(z).sum()
+    return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
 
 
+c_test = _cost(zk2)
 print(f"Linf: {abs(zk-zs).max()}")
 print(f"Linf: {abs(zk-zk2).sum()}")
-print(f"Cost: ista {_cost(zk)}, lista {_cost(zk2)}, model: {c_model}")
-assert np.allclose(zk, zk2, atol=1e-5)
+print(f"Cost: ista {_cost(zk)}, lista {c_test}, model: {c_model}")
+
 c_model = _cost(zk2)
 
 assert np.isclose(c_model, _cost(zk2))
+# assert np.allclose(zk, zk2, atol=1e-5)
 
 eps = 1e-5
 c_min = min(np.min(cost_fista), np.min(cost_ista)) - eps

@@ -1,9 +1,14 @@
 import sys
 import numpy as np
-from scipy import fftpack
-from numpy.fft import rfftn as fft, irfftn as ifft
+from scipy.signal import convolve2d
+
+# Import keras
+import keras.backend as K
+from keras.models import Model
+from keras.layers import Input, Conv2D, Add, Lambda
 
 from ._cost import ConvL2_z
+from .utils import get_soft_thresholding, get_cost_lasso_layer, cost_network
 
 
 def soft_thresholding(x, mu):
@@ -89,17 +94,22 @@ def ista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     cost: history of the cost evaluation after each iteration.
 
     """
-    f_cost = ConvL2_z(X, D)
-
-    def _cost(z):
-        return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
 
     # Initiate the algorithm
+    f_cost = ConvL2_z(X, D)
     if z0 is None:
         zk = f_cost.get_z0()
     else:
         zk = np.copy(z0)
     L = f_cost.L
+
+    # Define _cost function using keras to get conscistent results
+    # def _cost(z):
+    #     return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
+    zk_shape = (zk.shape[1],) + zk.shape[3:]
+    Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
+    _cost_model = cost_network((X.shape[1:], zk_shape), Dk, lmbd)
+    _cost = lambda zk: _cost_model([X, zk[:, :, 0]]).mean()
 
     c = _cost(zk)
     cost = [c]
@@ -132,19 +142,25 @@ def fista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     ------
     zk (array-like, N, K, w-wk+1, h-hk+1): code for the given signals
     cost: history of the cost evaluation after each iteration.
+    cost (list): cost at each iteration of the algorithm
 
     """
-    f_cost = ConvL2_z(X, D)
-
-    def _cost(z):
-        return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
 
     # Initiate the algorithm
+    f_cost = ConvL2_z(X, D)
     if z0 is None:
         zk = f_cost.get_z0()
     else:
         zk = np.copy(z0)
     L = f_cost.L
+
+    # Define _cost function using keras to get conscistent results
+    # def _cost(z):
+    #     return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
+    zk_shape = (zk.shape[1],) + zk.shape[3:]
+    Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
+    _cost_model = cost_network((X.shape[1:], zk_shape), Dk, lmbd)
+    _cost = lambda zk: _cost_model([X, zk[:, :, 0]]).mean()
 
     momentum = 1
     y = zk
@@ -173,5 +189,195 @@ def fista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
         _log((i + 1) / max_iter, c, verbose)
     if verbose > 0:
         print()
+
+    return zk, cost
+
+
+def conv_ista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
+    """Convolutional ISTA for X and D implemented using keras network
+
+    Parameters
+    ----------
+    X (array-like, N, p, w, h): signal to compute the sparse code.
+        There is N samples with p dimensional 2d signals of size wxh.
+    D (array-like, K, p, kw, kh): dictionary to compute the sparse code.
+        There is K atoms constituted by 2d p-dimensional signals of size kwxkh.
+    lmbd (float): regularization parameter for the sparse coding
+    max_iter (int): number of iteration for FISTA
+
+    Return
+    ------
+    zk (array-like, N, K, w-wk+1, h-hk+1): code for the given signals
+    cost: history of the cost evaluation after each iteration.
+    cost (list): cost at each iteration of the algorithm
+
+    """
+    input_dim = X.shape[1:]
+    d, c = D.shape[:2]
+    Wx_size = w, h = D.shape[-2:]
+
+    assert c == X.shape[1], "mismatched dimension between input and dictionary"
+
+    # Compute constants
+
+    f_cost = ConvL2_z(np.zeros((10,) + input_dim), D)
+    S = np.array([[[convolve2d(d1, d2, mode="full")
+                   for d1, d2 in zip(dk, dl)]
+                  for dk in D] for dl in D[:, :, ::-1, ::-1]]).mean(axis=2)
+    Wz_size = S.shape[-2:]
+    Wz = np.zeros(S.shape, dtype=D.dtype)
+    for i in range(d):
+        Wz[i, i, w - 1, h - 1] = 1
+    Wz -= S / f_cost.L
+    Wx = D[:, :, ::-1, ::-1] / (f_cost.L * c)
+
+    # Convolution in keras only work with kernel with shape
+    # (w, h, input_filters, output_filters)
+    # The convolution are reverser
+    Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
+    Wxk = np.transpose(Wx, (2, 3, 1, 0))[::-1, ::-1]
+    Wzk = np.transpose(Wz, (2, 3, 1, 0))[::-1, ::-1]
+
+    layer_x = Conv2D(d, Wx_size, padding="valid", data_format='channels_first',
+                     use_bias=False, kernel_initializer=lambda s: Wxk,
+                     trainable=False)
+    layer_z = Conv2D(d, Wz_size, padding="same", data_format='channels_first',
+                     use_bias=False, kernel_initializer=lambda s: Wzk,
+                     trainable=False)
+
+    # Define activation
+    activation = get_soft_thresholding(lmbd / f_cost.L)
+
+    # Define an input layer
+    x = Input(shape=input_dim)
+    cost_layer = get_cost_lasso_layer(x, Dk, lmbd)
+
+    def loss_lasso(_, zk):
+        return cost_layer(zk)
+
+    # The first layer is composed by only one connection so we define it using
+    # the keras API
+    z = activation(layer_x(x))
+
+    # For the following layers, we define the convolution with the previous
+    # layer and the input of the network and merge it for the activation layer
+    cost = [cost_layer(Lambda(lambda z: 0 * z)(z)), cost_layer(z)]
+    for k in range(max_iter - 1):
+        z = activation(Add()([layer_z(z), layer_x(x)]))
+        cost += [cost_layer(z)]
+
+    # Construct the model
+    model = Model(inputs=x, outputs=[z] + cost)
+
+    result = model.predict(X, verbose=1)
+    zk, cost = result[0], result[1:]
+    cost = np.mean(cost, axis=1)
+
+    return zk, cost
+
+
+def conv_fista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
+    """Convolutional fast ISTA for X and D implemented using keras network
+
+    Parameters
+    ----------
+    X (array-like, N, p, w, h): signal to compute the sparse code.
+        There is N samples with p dimensional 2d signals of size wxh.
+    D (array-like, K, p, kw, kh): dictionary to compute the sparse code.
+        There is K atoms constituted by 2d p-dimensional signals of size kwxkh.
+    lmbd (float): regularization parameter for the sparse coding
+    max_iter (int): number of iteration for FISTA
+
+    Return
+    ------
+    zk (array-like, N, K, w-wk+1, h-hk+1): code for the given signals
+    cost: history of the cost evaluation after each iteration.
+    cost (list): cost at each iteration of the algorithm
+
+    """
+    input_dim = X.shape[1:]
+    d, c = D.shape[:2]
+    Wx_size = w, h = D.shape[-2:]
+
+    assert c == X.shape[1], "mismatched dimension between input and dictionary"
+
+    # Compute constants
+
+    f_cost = ConvL2_z(np.zeros((10,) + input_dim), D)
+    S = np.array([[[convolve2d(d1, d2, mode="full")
+                   for d1, d2 in zip(dk, dl)]
+                  for dk in D] for dl in D[:, :, ::-1, ::-1]]).mean(axis=2)
+    Wz_size = S.shape[-2:]
+    Wz = np.zeros(S.shape, dtype=D.dtype)
+    for i in range(d):
+        Wz[i, i, w - 1, h - 1] = 1
+    Wz -= S / f_cost.L
+    Wx = D[:, :, ::-1, ::-1] / (f_cost.L * c)
+
+    # Convolution in keras only work with kernel with shape
+    # (w, h, input_filters, output_filters)
+    # The convolution are reverser
+    Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
+    Wxk = np.transpose(Wx, (2, 3, 1, 0))[::-1, ::-1]
+    Wzk = np.transpose(Wz, (2, 3, 1, 0))[::-1, ::-1]
+
+    layer_x = Conv2D(d, Wx_size, padding="valid", data_format='channels_first',
+                     use_bias=False, kernel_initializer=lambda s: Wxk,
+                     trainable=False)
+    layer_z = Conv2D(d, Wz_size, padding="same", data_format='channels_first',
+                     use_bias=False, kernel_initializer=lambda s: Wzk,
+                     trainable=False)
+
+    # Define activation
+    activation = get_soft_thresholding(lmbd / f_cost.L)
+
+    # Define an input layer
+    x = Input(shape=input_dim)
+    cost_layer = get_cost_lasso_layer(x, Dk, lmbd)
+
+    def loss_lasso(_, zk):
+        return cost_layer(zk)
+
+    # The first layer is composed by only one connection so we define it using
+    # the keras API
+    z = activation(layer_x(x))
+    z_old, momentum_1 = z, 1
+    momentum = 1
+
+    # For the following layers, we define the convolution with the previous
+    # layer and the input of the network and merge it for the activation layer
+    cost = [cost_layer(Lambda(lambda z: 0 * z)(z)), cost_layer(z)]
+    for _ in range(max_iter - 1):
+        momentum = (1 + np.sqrt(1 + 4 * momentum * momentum)) / 2
+        tk = (momentum_1 - 1) / momentum
+        y1 = Conv2D(d, Wz_size, padding="same",
+                    data_format='channels_first', use_bias=False,
+                    kernel_initializer=lambda s: (1 + tk) * Wzk)(z)
+        y2 = layer_x(x)
+        y3 = Conv2D(d, Wz_size, padding='same',
+                    data_format='channels_first', use_bias=False,
+                    kernel_initializer=lambda s: -tk * Wzk)(z_old)
+        y4 = layer_z(z)
+        # Keep the previous values for the next layer
+        z_old, momentum_1 = z, momentum
+
+        # Update current point and store cost
+        z1 = activation(Add()([y1, y2, y3]))
+        z2 = activation(Add()([y4, y2]))
+        c = cost_layer(z1)
+        z = Lambda(lambda x: K.tf.cond(K.mean(x[2]) < K.mean(x[3]),
+                                       lambda: x[0], lambda: x[1]))(
+            [z1, z2, c, cost[-1]]
+        )
+        cost += [cost_layer(z)]
+
+    # Construct the model
+    model = Model(inputs=x, outputs=[z] + cost)
+
+    print("predict!!!!")
+
+    result = model.predict(X, verbose=1)
+    zk, cost = result[0], result[1:]
+    cost = np.mean(cost, axis=1)
 
     return zk, cost

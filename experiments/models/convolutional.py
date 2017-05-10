@@ -8,12 +8,7 @@ from keras.layers import Dense, Dropout, Activation, Flatten
 from keras.layers import Conv2D, MaxPooling2D, Input, ZeroPadding2D
 from keras.layers.merge import Add
 from ._cost import ConvL2_z
-
-
-def get_soft_thresholding(mu):
-    def soft_thresholding(x):
-        return K.sign(x) * K.maximum(K.abs(x) - mu, 0)
-    return Activation(soft_thresholding)
+from .utils import get_soft_thresholding
 
 
 def dummy_feedforward_network(input_dim):
@@ -57,8 +52,8 @@ def convolutional_lista_network(input_dim, d, kernel_size, num_classes,
         activation = Activation(activation)
 
     x = Input(shape=input_dim)
-    z = Conv2D(d, kernel_size, padding="same", activation=activation,
-               data_format='channels_first')(x)
+    z = Conv2D(d, kernel_size, padding="same", data_format='channels_first')(x)
+    z = activation(z)
     for _ in range(n_layers - 1):
         y1 = Conv2D(d, kernel_size, padding="same",
                     data_format='channels_first')(z)
@@ -129,7 +124,7 @@ def alexnet(input_shape, num_classes):
 
 
 def conv_lista_network(input_dim, D, n_layers=10, activation="st",
-                       lmbd=1):
+                       lmbd=1, weights=None):
     """Construct a convolutional LISTA network with n_layers.
 
     Parameters
@@ -157,6 +152,7 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
     S = np.array([[[convolve2d(d1, d2, mode="full")
                    for d1, d2 in zip(dk, dl)]
                   for dk in D] for dl in D[:, :, ::-1, ::-1]]).mean(axis=2)
+    Wz_size = S.shape[-2:]
     Wz = np.zeros(S.shape, dtype=D.dtype)
     for i in range(d):
         Wz[i, i, w - 1, h - 1] = 1
@@ -170,17 +166,15 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
     Wxk = np.transpose(Wx, (2, 3, 1, 0))[::-1, ::-1]
     Wzk = np.transpose(Wz, (2, 3, 1, 0))[::-1, ::-1]
 
+    if weights is None:
+        weights = [(Wxk, Wzk)] * n_layers
+    elif len(weights) < n_layers:
+        weights = list(weights) + [(Wxk, Wzk)] * (n_layers - len(weights))
+
     if activation == "st":
         activation = get_soft_thresholding(lmbd / f_cost.L)
     else:
         activation = Activation(activation)
-
-    def Wz_initializer(shape, dtype=None):
-        return Wzk
-
-    def Wx_initializer(shape, dtype=None):
-        return Wxk
-    Wz_size = Wz.shape[-2:]
 
     # Compute the loss for our network using the LASSO minimization problem
     # We zero pad z to obtain the right boundary conditions, with the
@@ -194,35 +188,45 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
         err = x_rec - x
         cost = K.sum(K.mean(err ** 2, axis=(0, 1))) / 2
         cost += lmbd * K.sum(K.mean(K.abs(zk), axis=0))
-        return cost
+        return K.reshape(cost, (1, 1))
 
     # Define an input layer
     x = Input(shape=input_dim)
 
     # The first layer is composed by only one connection so we define it using
     # the keras API
-    z = Conv2D(d, Wx_size, padding="valid", activation=activation,
-               data_format='channels_first', use_bias=False,
-               kernel_initializer=Wx_initializer)(x)
+    wx0, _ = weights[0]
+    z = Conv2D(d, Wx_size, padding="valid", data_format='channels_first',
+               use_bias=False, kernel_initializer=lambda s: wx0)(x)
+    z = activation(z)
 
     # For the following layers, we define the convolution with the previous
     # layer and the input of the network and merge it for the activation layer
-    for _ in range(n_layers - 1):
+    for k in range(n_layers - 1):
+        wx0, wz0 = weights[k + 1]
         y1 = Conv2D(d, Wz_size, padding="same",
                     data_format='channels_first', use_bias=False,
-                    kernel_initializer=Wz_initializer)(z)
+                    kernel_initializer=lambda s: wz0)(z)
         y2 = Conv2D(d, Wx_size, padding="valid",
                     data_format='channels_first', use_bias=False,
-                    kernel_initializer=Wx_initializer)(x)
+                    kernel_initializer=lambda s: wx0)(x)
         z = activation(Add()([y1, y2]))
 
     # Construct the model
 
     model = Model(inputs=x, outputs=z)
-    opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
+    opt = keras.optimizers.rmsprop(lr=0.0001 / n_layers, decay=0)
     model.compile(loss=loss_lasso, optimizer=opt)
 
     model.Wz = Wz
     model.Wx = Wx
+
+    def get_weights():
+        w = [(model.weights[0].eval(K.get_session()), None)]
+        for wz, wx in zip(model.weights[1::2], model.weights[2::2]):
+            w += [(wx.eval(K.get_session()), wz.eval(K.get_session()))]
+        return w
+
+    model.get_weights = get_weights
 
     return model, loss_lasso

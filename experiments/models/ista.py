@@ -29,34 +29,52 @@ def sc_cost(x, D, zk, lmbd):
     return 1 / 2 * l2 + lmbd * l1
 
 
-def ista(X, max_iter, D, lmbd):
+def ista(X, D, lmbd, max_iter, z0=None, verbose=0):
     N, K = X.shape[0], D.shape[0]
     L = np.linalg.norm(D, ord=2)**2
 
-    zk = np.zeros(shape=(N, K))
-    cost = []
+    if z0 is None:
+        zk = np.zeros(shape=(N, K))
+    else:
+        zk = np.copy(z0)
+
+    def _cost(z):
+        return sc_cost(X, D, z, lmbd)
+
+    c = _cost(zk)
+    cost = [c]
+    _log(0, c, verbose)
     for i in range(max_iter):
         grad = (zk.dot(D) - X).dot(D.T)
         zk -= grad / L
         zk = soft_thresholding(zk, lmbd / L)
-        c = sc_cost(X, D, zk, lmbd)
+        c = _cost(zk)
         cost += [c]
-        sys.stdout.write(f"\rProgress: {i/max_iter:7.2%} - {c:.4f}")
-        sys.stdout.flush()
-    print(f"\rProgress: {max_iter/max_iter:7.2%} - {c:.4f}")
+        _log((i + 1) / max_iter, c, verbose)
+
+    if verbose > 0:
+        print()
 
     return zk, cost
 
 
-def fista(X, max_iter, D, lmbd):
+def fista(X, D, lmbd, max_iter, z0=None, verbose=0):
     N, K = X.shape[0], D.shape[0]
     L = np.linalg.norm(D, ord=2)**2
 
-    zk = np.zeros(shape=(N, K))
+    if z0 is None:
+        zk = np.zeros(shape=(N, K))
+    else:
+        zk = np.copy(z0)
     momentum = 1
     y = zk
 
-    cost = []
+    def _cost(z):
+        return sc_cost(X, D, z, lmbd)
+
+    c = _cost(zk)
+    cost = [c]
+    _log(0, c, verbose)
     for i in range(max_iter):
 
         z_old, momentum_1 = zk, momentum
@@ -67,11 +85,12 @@ def fista(X, max_iter, D, lmbd):
         momentum = (1 + np.sqrt(1 + 4 * momentum * momentum)) / 2
         y = zk + (momentum_1 - 1) / momentum * (zk - z_old)
 
-        c = sc_cost(X, D, zk, lmbd)
+        c = _cost(zk)
         cost += [c]
-        sys.stdout.write(f"\rProgress: {i/max_iter:7.2%} - {c:.4f}")
-        sys.stdout.flush()
-    print(f"\rProgress: {max_iter/max_iter:7.2%} - {c:.4f}")
+        _log((i + 1) / max_iter, c, verbose)
+
+    if verbose > 0:
+        print()
 
     return zk, cost
 
@@ -106,10 +125,14 @@ def ista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     # Define _cost function using keras to get conscistent results
     # def _cost(z):
     #     return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
-    zk_shape = (zk.shape[1],) + zk.shape[3:]
     Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
-    _cost_model = cost_network((X.shape[1:], zk_shape), Dk, lmbd)
-    _cost = lambda zk: _cost_model([X, zk[:, :, 0]]).mean()
+    if zk.ndim == 5:
+        zk_shape = (zk.shape[1],) + zk.shape[3:]
+        _cost_model = cost_network((X.shape[1:], zk_shape), Dk, lmbd)
+        _cost = lambda zk: _cost_model([X, zk[:, :, 0]]).mean()
+    else:
+        _cost_model = cost_network((X.shape[1:], zk.shape[1:]), Dk, lmbd)
+        _cost = lambda zk: _cost_model([X, zk]).mean()
 
     c = _cost(zk)
     cost = [c]
@@ -157,10 +180,9 @@ def fista_conv(X, D, lmbd, max_iter, z0=None, verbose=0):
     # Define _cost function using keras to get conscistent results
     # def _cost(z):
     #     return f_cost(z) + lmbd * abs(z).mean(axis=0).sum()
-    zk_shape = (zk.shape[1],) + zk.shape[3:]
     Dk = np.transpose(D, (2, 3, 0, 1))[::-1, ::-1]
-    _cost_model = cost_network((X.shape[1:], zk_shape), Dk, lmbd)
-    _cost = lambda zk: _cost_model([X, zk[:, :, 0]]).mean()
+    _cost_model = cost_network((X.shape[1:], zk.shape[1:]), Dk, lmbd)
+    _cost = lambda zk: _cost_model([X, zk]).mean()
 
     momentum = 1
     y = zk
@@ -249,7 +271,7 @@ def conv_ista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
     activation = get_soft_thresholding(lmbd / f_cost.L)
 
     # Define an input layer
-    x = Input(shape=input_dim)
+    inputs = x = Input(shape=input_dim)
     cost_layer = get_cost_lasso_layer(x, Dk, lmbd)
 
     def loss_lasso(_, zk):
@@ -257,7 +279,14 @@ def conv_ista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
 
     # The first layer is composed by only one connection so we define it using
     # the keras API
-    z = activation(layer_x(x))
+    if z0 is None:
+        z = activation(layer_x(x))
+    else:
+        if z0.ndim == 5:
+            z0 = z0[:, :, 0]
+        z = Input(shape=z0.shape[1:])
+        inputs = [x, z]
+        z = activation(Add()([layer_x(x), layer_z(z)]))
 
     # For the following layers, we define the convolution with the previous
     # layer and the input of the network and merge it for the activation layer
@@ -267,9 +296,13 @@ def conv_ista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
         cost += [cost_layer(z)]
 
     # Construct the model
-    model = Model(inputs=x, outputs=[z] + cost)
+    model = Model(inputs=inputs, outputs=[z] + cost)
 
-    result = model.predict(X, verbose=1)
+    if z0 is None:
+        result = model.predict(X, verbose=1)
+    else:
+        result = model.predict([X, z0], verbose=1)
+
     zk, cost = result[0], result[1:]
     cost = np.mean(cost, axis=1)
 
@@ -303,7 +336,7 @@ def conv_fista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
 
     # Compute constants
 
-    f_cost = ConvL2_z(np.zeros((10,) + input_dim), D)
+    f_cost = ConvL2_z(np.zeros((1,) + input_dim), D)
     S = np.array([[[convolve2d(d1, d2, mode="full")
                    for d1, d2 in zip(dk, dl)]
                   for dk in D] for dl in D[:, :, ::-1, ::-1]]).mean(axis=2)
@@ -332,7 +365,7 @@ def conv_fista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
     activation = get_soft_thresholding(lmbd / f_cost.L)
 
     # Define an input layer
-    x = Input(shape=input_dim)
+    inputs = x = Input(shape=input_dim)
     cost_layer = get_cost_lasso_layer(x, Dk, lmbd)
 
     def loss_lasso(_, zk):
@@ -340,13 +373,22 @@ def conv_fista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
 
     # The first layer is composed by only one connection so we define it using
     # the keras API
-    z = activation(layer_x(x))
+
+    if z0 is None:
+        z = activation(layer_x(x))
+    else:
+        if z0.ndim == 5:
+            z0 = z0[:, :, 0]
+        z = Input(shape=z0.shape[1:])
+        inputs = [x, z]
+        z = activation(Add()([layer_x(x), layer_z(z)]))
+
     z_old, momentum_1 = z, 1
     momentum = 1
+    cost = [cost_layer(Lambda(lambda z: 0 * z)(z)), cost_layer(z)]
 
     # For the following layers, we define the convolution with the previous
     # layer and the input of the network and merge it for the activation layer
-    cost = [cost_layer(Lambda(lambda z: 0 * z)(z)), cost_layer(z)]
     for _ in range(max_iter - 1):
         momentum = (1 + np.sqrt(1 + 4 * momentum * momentum)) / 2
         tk = (momentum_1 - 1) / momentum
@@ -372,11 +414,13 @@ def conv_fista_network(X, D, lmbd, max_iter, z0=None, verbose=0):
         cost += [cost_layer(z)]
 
     # Construct the model
-    model = Model(inputs=x, outputs=[z] + cost)
+    model = Model(inputs=inputs, outputs=[z] + cost)
 
-    print("predict!!!!")
+    if z0 is None:
+        result = model.predict(X, verbose=1)
+    else:
+        result = model.predict([X, z0], verbose=1)
 
-    result = model.predict(X, verbose=1)
     zk, cost = result[0], result[1:]
     cost = np.mean(cost, axis=1)
 

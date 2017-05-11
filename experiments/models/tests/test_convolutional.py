@@ -31,9 +31,9 @@ def test_initial_filters_conv_lista():
 
     z = keras.layers.Input(shape=zs.shape[1:])
     x = keras.layers.Input(shape=data.shape[1:])
-    gx0_m = m.layers[1](x)
-    gx1_m = m.layers[3](x)
-    gz1_m = m.layers[2](z)
+    gx0_m = m.layers[2](m.layers[1](x))
+    gx1_m = m.layers[4](x)
+    gz1_m = m.layers[3](z)
     g1_m = Add()([gz1_m, gx1_m])
 
     m_test = keras.models.Model(

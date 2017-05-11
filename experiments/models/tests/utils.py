@@ -1,6 +1,7 @@
 import numpy as np
 from numpy.fft import rfft2 as fft, irfft2 as ifft
 
+from ...datasets.dictionaries import create_gaussian_dictionary
 from ...datasets.dictionaries import create_gaussian_conv_dictionary
 
 
@@ -62,5 +63,22 @@ def _create_conv_data(N=10, d=1, p=64, k=3, c=3, rho=.02, lmbd=1):
 
     z_fft = fft(z, s=fft_shape)
     data = ifft((D_fft[None] * z_fft[:, :, None]).sum(axis=1))[:, :, :p, :p]
+
+    return data.astype(FLOAT), D.astype(FLOAT), z.astype(FLOAT)
+
+
+def _create_data(N=10, d=1, p=64, rho=.02, lmbd=1):
+
+    D = create_gaussian_dictionary(d, p)
+
+    # generate z support
+    print("Generate z support")
+    z = (np.random.rand(N, d) < rho).astype(FLOAT)
+    print("Generate z coefficients")
+    z *= 10 * np.random.normal(size=(N, d))
+
+    print("Non-Zero  in z:", 1 - np.isclose(z, 0).sum() / z.size)
+
+    data = z.dot(D)
 
     return data.astype(FLOAT), D.astype(FLOAT), z.astype(FLOAT)

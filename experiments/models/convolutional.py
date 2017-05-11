@@ -215,7 +215,7 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
     # Construct the model
 
     model = Model(inputs=x, outputs=z)
-    opt = keras.optimizers.rmsprop(lr=0.0001 / n_layers, decay=0)
+    opt = keras.optimizers.rmsprop(lr=0.0001 / n_layers, decay=1e-6)
     model.compile(loss=loss_lasso, optimizer=opt)
 
     model.Wz = Wz

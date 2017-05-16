@@ -7,7 +7,7 @@ from keras.layers.merge import Add
 from .utils import FLOAT, _soft_thresholding
 from .utils import repeat, _test_allclose, _create_conv_data
 from .._cost import ConvL2_z
-from ..convolutional import conv_lista_network
+from ..convolutional import lista_conv_network
 from ..ista import ista_conv
 
 
@@ -24,8 +24,8 @@ def test_initial_filters_conv_lista():
     z0 = np.random.normal(size=zs.shape).astype(FLOAT)
     f_cost = ConvL2_z(data, D)
 
-    m, loss = conv_lista_network((c, p, p), D, n_layers=2,
-                                 activation="st", lmbd=lmbd)
+    m = lista_conv_network((c, p, p), D, n_layers=2,
+                           activation="st", lmbd=lmbd)
 
     Wz, Wx = m.Wz, m.Wx
 
@@ -91,8 +91,8 @@ def test_initial_filters_conv_lista():
     _test_allclose(z_test, z_l2, msg="Mismatch with Conv2D", atol=5e-6)
 
 
-@repeat(4)
 @pytest.mark.parametrize("N_layers", [1, 2, 3, 5, 10, 50])
+@repeat(4)
 def test_cost_conv_lista(N_layers):
     # Test the cost computation using the LISTA model
     N, d, p, k, c = 10, 5, 32, 5, 3
@@ -102,14 +102,13 @@ def test_cost_conv_lista(N_layers):
     data, D, z = _create_conv_data(N=N, d=d, p=p, k=k, c=c, rho=rho, lmbd=lmbd)
 
     # Base line
-    m, loss = conv_lista_network((c, p, p), D, n_layers=N_layers,
-                                 activation="st", lmbd=lmbd)
+    m = lista_conv_network((c, p, p), D, lmbd=lmbd, n_layers=N_layers,
+                           activation="st")
 
     zk, cost_ista = ista_conv(X=data, D=D, lmbd=lmbd, max_iter=N_layers)
     zk = zk[:, :, 0]
-    zk2 = m.predict(data, batch_size=len(data))
-
-    c_model = m.evaluate(data, 0 * zk, batch_size=N)
+    zk2, c_model = m.predict(data, batch_size=len(data))
+    c_model = np.mean(c_model)
 
     # Test cost
     f_cost = ConvL2_z(data, D)

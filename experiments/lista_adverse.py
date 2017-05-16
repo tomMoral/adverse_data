@@ -1,38 +1,24 @@
-import numpy as np
-import keras
-
-from .models.ista import ista, fista
-from .models.feed_forward import lista_network
 from .datasets.dictionaries import create_adversarial_dictionary
-from .datasets.labels import sign_test_labels, parity_test_labels
+from .datasets.sparse_coding import sparse_code
+from .protocols import network_comparison
 
 # Model parameters
-N = 100000
-K = 130
-p = 64
-N_layers = 4
+N = 90000
+K = 256
+p = 50
 
-rho = .2
+rho = .05
+lmbd = .01
+sigma = 10
 
-# internal
-data_shape = (N, p)
-num_classes = 2
+N_layers = 200
+N_epochs = 800
 
 D = create_adversarial_dictionary(K, p)
+z, data = sparse_code(N, D, rho=rho, sigma=sigma)
+
+network_comparison(data, D, z, lmbd, N_layers=N_layers, N_epochs=N_epochs,
+                   name="lista_adverse")
 
 
-model = lista_network((p,), K, num_classes, n_layers=N_layers, lmbd=1,
-                      activation='relu', D=D)
-
-# Define the dataset
-z = (np.random.rand(N, K) < rho).astype(np.float)
-z *= 1 * np.random.normal(size=(N, K))
-data = z.dot(D)
-
-# Base line
-zk, cost = ista(data, N_layers, D, 1)
-zs, cost_full = fista(data, 100, D, 1)
-
-y = parity_test_labels(zs)
-y_pred = parity_test_labels(zk)
-labels = keras.utils.to_categorical(y, num_classes=num_classes)
+raise SystemExit(0)

@@ -1,14 +1,14 @@
 import keras
 import numpy as np
-from keras import backend as K
 from scipy.signal import convolve2d
 
+from keras.backend import get_session
 from keras.models import Sequential, Model
 from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Conv2D, MaxPooling2D, Input, ZeroPadding2D
+from keras.layers import Conv2D, MaxPooling2D, Input
 from keras.layers.merge import Add
 from ._cost import ConvL2_z
-from .utils import get_soft_thresholding
+from .utils import get_soft_thresholding_layer, get_cost_conv_lasso_layer
 
 
 def dummy_feedforward_network(input_dim):
@@ -47,7 +47,7 @@ def convolutional_lista_network(input_dim, d, kernel_size, num_classes,
     model: a keras.model containing the network.
     """
     if activation == "st":
-        activation = get_soft_thresholding(lmbd)
+        activation = get_soft_thresholding_layer(lmbd)
     else:
         activation = Activation(activation)
 
@@ -123,7 +123,7 @@ def alexnet(input_shape, num_classes):
     return model
 
 
-def conv_lista_network(input_dim, D, n_layers=10, activation="st",
+def lista_conv_network(input_dim, D, n_layers=10, activation="st",
                        lmbd=1, weights=None):
     """Construct a convolutional LISTA network with n_layers.
 
@@ -141,10 +141,10 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
     """
 
     D = np.array(D)
-    p, (d, c) = input_dim[0], D.shape[:2]
+    d, c = D.shape[:2]
     Wx_size = w, h = D.shape[-2:]
 
-    assert p == D.shape[1], "mismatched dimension between input and dictionary"
+    assert input_dim[0] == c, "mismatched dimension between input and dictionary"
 
     # Compute constants
 
@@ -172,26 +172,15 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
         weights = list(weights) + [(Wxk, Wzk)] * (n_layers - len(weights))
 
     if activation == "st":
-        activation = get_soft_thresholding(lmbd / f_cost.L)
+        activation = get_soft_thresholding_layer(lmbd / f_cost.L)
     else:
         activation = Activation(activation)
 
-    # Compute the loss for our network using the LASSO minimization problem
-    # We zero pad z to obtain the right boundary conditions, with the
-    # border coefficient extending the image by the kernel size.
-    def loss_lasso(_, zk):
-        padding = (Dk.shape[0] // 2, Dk.shape[1] // 2)
-        zp = ZeroPadding2D(padding=padding, data_format='channels_first')(zk)
-
-        x_rec = K.conv2d(zp, K.constant(Dk), padding='same',
-                         data_format='channels_first')
-        err = x_rec - x
-        cost = K.sum(K.mean(err ** 2, axis=(0, 1))) / 2
-        cost += lmbd * K.sum(K.mean(K.abs(zk), axis=0))
-        return K.reshape(cost, (1, 1))
-
     # Define an input layer
     x = Input(shape=input_dim)
+
+    # Compute the loss for our network using the LASSO minimization problem
+    cost_layer = get_cost_conv_lasso_layer(x, Dk, lmbd)
 
     # The first layer is composed by only one connection so we define it using
     # the keras API
@@ -214,19 +203,24 @@ def conv_lista_network(input_dim, D, n_layers=10, activation="st",
 
     # Construct the model
 
-    model = Model(inputs=x, outputs=z)
+    model = Model(inputs=x, outputs=[z, cost_layer(z)])
+
+    def loss(y, yp):
+        print("Shape yp[0", yp.get_shape())
+        return cost_layer(z)
+
     opt = keras.optimizers.rmsprop(lr=0.0001 / n_layers, decay=1e-6)
-    model.compile(loss=loss_lasso, optimizer=opt)
+    model.compile(loss=loss, optimizer=opt)
 
     model.Wz = Wz
     model.Wx = Wx
 
-    def get_weights():
-        w = [(model.weights[0].eval(K.get_session()), None)]
+    def export_weights():
+        w = [(model.weights[0].eval(get_session()), None)]
         for wz, wx in zip(model.weights[1::2], model.weights[2::2]):
-            w += [(wx.eval(K.get_session()), wz.eval(K.get_session()))]
+            w += [(wx.eval(get_session()), wz.eval(get_session()))]
         return w
 
-    model.get_weights = get_weights
+    model.export_weights = export_weights
 
-    return model, loss_lasso
+    return model

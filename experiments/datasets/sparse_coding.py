@@ -20,6 +20,8 @@ def sparse_code(N, D, rho=.02, sigma=1):
     K = D.shape[0]
     z = (np.random.rand(N, K) < rho).astype(np.float)
     z *= sigma * np.random.normal(size=(N, K))
+    nz = np.isclose(abs(z).sum(axis=1), 0).sum()
+    print(f"Generate {nz} 0 with this sparse code")
     return z, z.dot(D)
 
 

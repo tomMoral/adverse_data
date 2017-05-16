@@ -1,15 +1,12 @@
 import keras
 import numpy as np
-from keras import backend as K
 
+from keras.backend import get_session
 from keras.models import Sequential, Model
-from keras.layers import Dense, Dropout, Activation, Flatten
-from keras.layers import Conv2D, MaxPooling2D, Input
+from keras.layers import Dense, Add, Input
 
-
-def get_soft_thresholding(lmbd):
-    def soft_thresholding(x):
-        return K.relu(x - lmbd) - K.relu(-x - lmbd)
+from ._cost import LossL2
+from .utils import get_cost_lasso_layer, get_soft_thresholding_layer
 
 
 def dummy_feedforward_network(input_dim):
@@ -30,49 +27,62 @@ def dummy_feedforward_network(input_dim):
     return model
 
 
-def lista_network(input_dim, d, num_classes, n_layers=10,
-                  activation="relu", lmbd=.1, D=None):
+def lista_network(input_dim, D, n_layers=10, activation="st", lmbd=.1,
+                  weights=None):
     """Construct LISTA like network with n_layers.
 
     Parameters
     ----------
     input_dim (int): size of the input for this network
-    d (int): number of dictionary used in LISTA
-    num_classes (int): number of output
+    D (array-like - (K, p)): dictionary to compute the sparse code.
+        There is K atoms in a p-dimensional space.
     n_layers (int:10): number of layer to add in the network
-    activation (str:None)
+    activation (str:None): activation function, for LISTA, this should be "st"
 
     Return args
     -----------
     model: a keras.model containing the network.
     """
-    if activation == "st":
-        activation = get_soft_thresholding(lmbd)
-    else:
-        activation = Activation(activation)
 
-    x = Input(shape=input_dim)
-    z = Dense(d, activation=activation)(x)
-    for _ in range(n_layers - 1):
-        h = keras.layers.add([Dense(d)(x), Dense(d)(z)])
-        z = activation(h)
-    y_pred = Dense(num_classes, activation='softmax')(z)
-    model = Model(inputs=x, outputs=y_pred)
+    K, p = D.shape
+    assert input_dim == p
 
-    if D is not None:
-        cost = keras.losses.mean_squared_error(
-            model.input, K.dot(z, K.constant(D)))
-        cost += lmbd * K.sum(K.abs(z))
+    f_cost = LossL2(np.zeros(shape=(1, p)), D)
+    Wz = np.eye(K, dtype=D.dtype) - D.dot(D.T) / f_cost.L
+    Wx = D.T / f_cost.L
+    if weights is None:
+        weights = [(Wx, Wz)] * n_layers
+    elif len(weights) < n_layers:
+        weights = list(weights) + [(Wx, Wz)] * (n_layers - len(weights))
 
-        def metric_cost(y, yp):
-            return cost
+    # Define some layers to build the neural network
+    x = Input(shape=(input_dim, ))
+    cost_layer = get_cost_lasso_layer(x, D, lmbd)
+    activation = get_soft_thresholding_layer(lmbd / f_cost.L)
 
-        def loss(y, yp):
-            return keras.metrics.categorical_crossentropy(y, yp) + cost / 10000
+    wx0, _ = weights[0]
+    z = Dense(K, use_bias=False, kernel_initializer=lambda s: wx0)(x)
+    z = activation(z)
+    for k in range(n_layers - 1):
+        wxk, wzk = weights[k + 1]
+        y1 = Dense(K, use_bias=False, kernel_initializer=lambda s: wzk)(z)
+        y2 = Dense(K, use_bias=False, kernel_initializer=lambda s: wxk)(x)
+        z = activation(Add()([y1, y2]))
 
-    opt = keras.optimizers.rmsprop(lr=0.0001, decay=1e-6)
-    model.compile(loss=loss,
-                  optimizer=opt, metrics=[keras.metrics.categorical_accuracy,
-                                          metric_cost])
+    model = Model(inputs=x, outputs=z)
+
+    def loss(y, yp):
+        return cost_layer(z)
+
+    opt = keras.optimizers.rmsprop(lr=0.0001 / n_layers, decay=1e-6)
+    model.compile(loss=loss, optimizer=opt)
+
+    def export_weights():
+        w = [(model.weights[0].eval(get_session()), None)]
+        for wz, wx in zip(model.weights[1::2], model.weights[2::2]):
+            w += [(wx.eval(get_session()), wz.eval(get_session()))]
+        return w
+
+    model.export_weights = export_weights
 
     return model

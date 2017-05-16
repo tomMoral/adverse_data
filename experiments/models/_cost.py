@@ -28,7 +28,7 @@ class LossL2(object):
         """Compute the value of the Cost function"""
         assert z.shape[:-1] == self.X.shape[:-1]
         aux = self.X - z.dot(self.D)
-        return np.sum(aux * aux) / (2 * self.N)
+        return np.sum(aux * aux) / 2
 
     def grad(self, z, out=None):
         """Compute the gradient of the cost at point z.
@@ -43,7 +43,7 @@ class LossL2(object):
         """
         if out is None:
             out = np.empty(z.shape)
-        out[:] = (z.dot(self.DtD) - self.DtX) / self.N
+        out[:] = (z.dot(self.DtD) - self.DtX)
         return out
 
     def zstep(self, t, z_dual, mu, out=None):

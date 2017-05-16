@@ -1,6 +1,10 @@
+# Specific config files
+.vscode
+
 # Cache directory
 .cache
 __pycache__
 
 # data and images
 *.pdf
+*.npy
